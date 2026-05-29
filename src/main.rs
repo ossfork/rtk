@@ -1361,6 +1361,7 @@ fn main() {
     // Rust ignores SIGPIPE by default and with panic="abort" in the
     // release profile that becomes SIGABRT + coredump.
     #[cfg(unix)]
+    #[allow(unsafe_code)]
     unsafe {
         // nosemgrep: unsafe-block
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
