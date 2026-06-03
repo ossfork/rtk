@@ -940,7 +940,12 @@ mod tests {
 
     #[test]
     fn test_wrapped_rules_cursor_shell_only() {
-        let v = serde_json::json!(["Shell(git)", "Shell(curl:*)", "Read(src/**)", "Shell(npm test)"]);
+        let v = serde_json::json!([
+            "Shell(git)",
+            "Shell(curl:*)",
+            "Read(src/**)",
+            "Shell(npm test)"
+        ]);
         let mut out = Vec::new();
         append_wrapped_rules(Some(&v), &["Shell("], &mut out);
         assert_eq!(out, vec!["git", "curl:*", "npm test"]);
