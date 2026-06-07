@@ -6,6 +6,7 @@
 //! mode toggle) that TOML DSL cannot express.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use lazy_static::lazy_static;
@@ -14,6 +15,10 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
+
+/// Cap on emitted failing test-class blocks and `[ERROR] Failures:` summary
+/// entries — test-failure cap class, same binding as pytest/rspec/rake/runner.
+const MAX_MVN_FAILING_CLASSES: usize = CAP_WARNINGS;
 
 // ── Shared regex patterns ────────────────────────────────────────────────────
 
@@ -223,7 +228,7 @@ fn keep_outside_block(line: &str) -> bool {
 ///   - in-block buffering until the next CLOSE line
 ///   - CLOSE with `Failures > 0` or `Errors > 0` → yields
 ///     [`SurefireStep::FailingClose`] so the outer loop can decide whether to
-///     emit (Commit D uses this seam to enforce `mvn_max_failures`)
+///     emit (this seam enforces [`MAX_MVN_FAILING_CLASSES`])
 ///   - failure-trail handling for the exception/user-frame trail Surefire 3.x
 ///     emits **after** the close line, terminated by a blank line. Framework
 ///     frames (junit, jdk.proxy, java.base, etc.) are stripped from both the
@@ -443,8 +448,8 @@ impl<'a> SurefireBlock<'a> {
 /// The aggregate `[ERROR] Tests run:` line is matched by `AGG` and kept; the
 /// `[ERROR]   ` entries are kept by the catch-all `[ERROR]` keeper. On builds
 /// with hundreds of failures this can be quite large. Cap entries at
-/// `mvn_max_failures` and emit `\n... +N more failures\n` immediately before
-/// the `Tests run:` aggregate when entries were dropped.
+/// [`MAX_MVN_FAILING_CLASSES`] and emit `\n... +N more failures\n` immediately
+/// before the `Tests run:` aggregate when entries were dropped.
 struct FailuresSummaryCap {
     cap: usize,
     in_summary: bool,
@@ -469,7 +474,8 @@ impl FailuresSummaryCap {
         if !self.in_summary || !line.starts_with("[ERROR]   ") {
             return false;
         }
-        if self.cap == 0 || self.emitted < self.cap {
+        // Per core cap policy, `0` means summary-only: no entries, tail still counts.
+        if self.emitted < self.cap {
             out.push_str(line);
             out.push('\n');
             self.emitted += 1;
@@ -524,7 +530,7 @@ impl FailuresSummaryCap {
 /// English-footer guard: if no `BUILD SUCCESS`/`BUILD FAILURE` line is present,
 /// return the ANSI-stripped raw input (non-English locale or truncated output).
 pub fn filter_surefire(raw: &str) -> String {
-    filter_surefire_with_cap(raw, crate::core::config::limits().mvn_max_failures)
+    filter_surefire_with_cap(raw, MAX_MVN_FAILING_CLASSES)
 }
 
 fn filter_surefire_with_cap(raw: &str, cap: usize) -> String {
@@ -549,7 +555,7 @@ fn filter_surefire_with_cap(raw: &str, cap: usize) -> String {
                 lines,
                 close,
             } => {
-                if cap == 0 || emitted_failing < cap {
+                if emitted_failing < cap {
                     block.commit_failing(&mut out, running, &lines, close);
                     emitted_failing += 1;
                 } else {
@@ -687,7 +693,7 @@ pub fn filter_compile(raw: &str) -> String {
 /// Outside any Surefire block, applies the unified keep-list (compile keepers
 /// + install/artifact lines).
 pub fn filter_package(raw: &str) -> String {
-    filter_package_with_cap(raw, crate::core::config::limits().mvn_max_failures)
+    filter_package_with_cap(raw, MAX_MVN_FAILING_CLASSES)
 }
 
 fn filter_package_with_cap(raw: &str, cap: usize) -> String {
@@ -713,7 +719,7 @@ fn filter_package_with_cap(raw: &str, cap: usize) -> String {
                 lines,
                 close,
             } => {
-                if cap == 0 || emitted_failing < cap {
+                if emitted_failing < cap {
                     block.commit_failing(&mut out, running, &lines, close);
                     emitted_failing += 1;
                 } else {
@@ -1671,10 +1677,10 @@ mod tests {
         );
     }
 
-    /// Cap of 0 means no cap — same fixture but with `cap = 0` should emit
-    /// all five blocks without any tail.
+    /// Cap of 0 means summary-only (core cap policy): no failing-class blocks
+    /// emitted, tail still counts every dropped class.
     #[test]
-    fn surefire_cap_zero_disables_capping() {
+    fn surefire_cap_zero_emits_summary_only() {
         let mut i = String::from(
             "[INFO] Scanning for projects...\n\
              [INFO] -----< x >-----\n",
@@ -1691,15 +1697,15 @@ mod tests {
         let o = filter_surefire_with_cap(&i, 0);
         for n in 1..=5 {
             assert!(
-                o.contains(&format!("Running x.Fail{}", n)),
-                "Fail{n} kept under cap=0; got:\n{}",
+                !o.contains(&format!("Running x.Fail{}", n)),
+                "Fail{n} dropped under cap=0; got:\n{}",
                 o,
                 n = n
             );
         }
         assert!(
-            !o.contains("more failing test classes"),
-            "no tail under cap=0; got:\n{}",
+            o.contains("+5 more failing test classes"),
+            "tail counts all 5 under cap=0; got:\n{}",
             o
         );
     }
