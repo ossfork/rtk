@@ -862,9 +862,21 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
-    if !result.stderr.is_empty() && result.stderr.contains("not a git repository") {
-        let message = "Not a git repository".to_string();
-        eprintln!("{}", message);
+    // Any git status failure must propagate, not be flattened into a clean
+    // working tree + exit 0 (#2497). The non-compact path above already guards
+    // on success; the compact path previously only caught "not a git repository"
+    // and let every other failure (corrupt index, lock contention, …) fall
+    // through to a success-looking summary. Keep the friendly message for the
+    // common not-a-repo case; surface raw stderr otherwise.
+    if !result.success() {
+        let message = if result.stderr.contains("not a git repository") {
+            "Not a git repository".to_string()
+        } else {
+            result.stderr.trim().to_string()
+        };
+        if !message.is_empty() {
+            eprintln!("{}", message);
+        }
         let original_cmd = if args.is_empty() {
             "git status".to_string()
         } else {
@@ -1892,6 +1904,30 @@ mod tests {
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
+    fn test_run_status_compact_propagates_non_repo_failure() {
+        // #2497: a `git status` failure other than "not a git repository"
+        // (here: a corrupt index) must propagate a non-zero exit, not be
+        // flattened into "Clean working tree" + exit 0.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().into_owned();
+        assert!(
+            Command::new("git")
+                .args(["-C", &p, "init", "-q"])
+                .status()
+                .expect("git init")
+                .success(),
+            "git init should succeed"
+        );
+        std::fs::write(dir.path().join(".git/index"), "corrupt-index").expect("corrupt index");
+        let global = vec!["-C".to_string(), p];
+        let code = run_status(&[], 0, &global).expect("run_status");
+        assert_ne!(
+            code, 0,
+            "corrupt-index git status must not be reported as success"
+        );
     }
 
     #[test]
